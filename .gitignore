@@ -1,0 +1,6 @@
+# 編譯產物
+build/
+# 第三方字庫與由它產生的檔案：不放進這個專案，安裝時從原始來源下載
+vendor/
+Resources/
+.DS_Store
