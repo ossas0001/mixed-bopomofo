@@ -21,6 +21,10 @@ final class MixedInputController: IMKInputController {
     // 這些狀態所有視窗共用
     private static var englishMode = false
     private static var shiftAlone = false
+    private static var shiftDownAt = Date.distantPast
+    /// 輸入法只收得到鍵盤事件；用全域監聽得知滑鼠點擊，Shift＋點滑鼠（選取文字）就不算單按 Shift
+    private static let mouseMonitor: Any? = NSEvent.addGlobalMonitorForEvents(
+        matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]) { _ in shiftAlone = false }
     private static let candidatePanel = FloatingPanel()
     private static let modePanel = FloatingPanel()
     private static var cands: [Engine.Candidate] = []
@@ -120,10 +124,13 @@ final class MixedInputController: IMKInputController {
     // MARK: 單按 Shift 切換中／英
     private func handleShiftTap(_ event: NSEvent, flags: NSEvent.ModifierFlags) {
         let isShiftKey = event.keyCode == 56 || event.keyCode == 60
+        _ = Self.mouseMonitor
         if isShiftKey && flags.subtracting(.capsLock) == .shift {
             Self.shiftAlone = true                           // Shift 剛按下
-        } else if isShiftKey && Self.shiftAlone && flags.subtracting(.capsLock).isEmpty {
-            Self.shiftAlone = false                          // Shift 放開，中間沒按別的鍵
+            Self.shiftDownAt = Date()
+        } else if isShiftKey && Self.shiftAlone && flags.subtracting(.capsLock).isEmpty
+                    && Date().timeIntervalSince(Self.shiftDownAt) < 0.5 && NSEvent.pressedMouseButtons == 0 {
+            Self.shiftAlone = false                          // Shift 很快放開，中間沒按別的鍵、沒點滑鼠
             commit()
             Self.englishMode.toggle()
             showMode()
@@ -227,6 +234,14 @@ final class MixedInputController: IMKInputController {
     }
 
     override func commitComposition(_ sender: Any!) { commit() }
+
+    /// 切到新的 app 或文字欄位時，如果是英文模式就提醒一下
+    override func activateServer(_ sender: Any!) {
+        super.activateServer(sender)
+        _ = Self.mouseMonitor
+        guard Self.englishMode else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.showMode() }
+    }
 
     override func deactivateServer(_ sender: Any!) {
         commit()
