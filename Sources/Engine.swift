@@ -38,7 +38,79 @@ final class Engine {
     var isEmpty: Bool { segs.isEmpty && cur.isEmpty && tail.isEmpty }
 
     // MARK: 載入字庫
-    init(zhPath: String, enPath: String) {
+    // MARK: 學習
+    /// 使用者選過的字詞：「注音\t文字」→ (選過幾次, 最後一次使用的時間)
+    private var learned: [String: (count: Int, last: TimeInterval)] = [:]
+    private var learnedByReading: [String: [String]] = [:]
+    private let learnPath: String?
+
+    /// 學到的字詞分數＝這組注音原本第一名的分數＋加分。
+    /// 單字只加一點點：讓它排第一，但不會蓋過「單車」這類常用詞；新學的詞組加比較多，才能勝過拆開的單字。
+    /// 選越多次加越多；很久沒用加分會慢慢變少。
+    private func learnedScore(_ key: String, _ e: (count: Int, last: TimeInterval)) -> Double {
+        let days = max(0, Date().timeIntervalSince1970 - e.last) / 86400
+        let syls = key.split(separator: "-").map(String.init)
+        let baseline = phrases[key]?.first?.score
+            ?? syls.reduce(0) { $0 + (phrases[$1]?.first?.score ?? -20) }
+        let strength = syls.count == 1 ? 0.2 : 1.0
+        let bonus = strength * (1 + 0.3 * log2(Double(e.count))) - 0.02 * days
+        return baseline + max(bonus, 0.01)
+    }
+
+    /// 字庫加上學到的字詞，分數高的在前
+    private func lookup(_ key: String) -> [(text: String, score: Double)] {
+        let base = phrases[key] ?? []
+        guard let texts = learnedByReading[key] else { return base }
+        var merged = base
+        for t in texts {
+            guard let e = learned[key + "\t" + t] else { continue }
+            let sc = learnedScore(key, e)
+            if let i = merged.firstIndex(where: { $0.text == t }) { merged[i].score = max(merged[i].score, sc) }
+            else { merged.append((t, sc)) }
+        }
+        return merged.sorted { $0.score > $1.score }
+    }
+
+    private func learn(_ readings: [String], _ text: String) {
+        guard learnPath != nil, !readings.isEmpty, text.count == readings.count || readings.count == 1 else { return }
+        let key = readings.joined(separator: "-")
+        let id = key + "\t" + text
+        if learned[id] == nil { learnedByReading[key, default: []].append(text) }
+        learned[id] = ((learned[id]?.count ?? 0) + 1, Date().timeIntervalSince1970)
+    }
+
+    private func loadLearned() {
+        guard let path = learnPath, let data = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+        data.enumerateLines { line, _ in
+            let p = line.split(separator: "\t")
+            guard p.count == 4, let c = Int(p[2]), let t = Double(p[3]) else { return }
+            let key = String(p[0]), text = String(p[1])
+            if self.learned[key + "\t" + text] == nil { self.learnedByReading[key, default: []].append(text) }
+            self.learned[key + "\t" + text] = (c, t)
+        }
+    }
+
+    /// 存檔（只存在本機）。最多留 20000 筆，超過就丟掉最久沒用的
+    private func saveLearned() {
+        guard let path = learnPath else { return }
+        var items = learned.map { ($0.key, $0.value) }
+        if items.count > 20000 {
+            items.sort { $0.1.last > $1.1.last }
+            items = Array(items.prefix(20000))
+            learned = Dictionary(uniqueKeysWithValues: items)
+            learnedByReading = [:]
+            for (id, _) in items {
+                let p = id.split(separator: "\t")
+                learnedByReading[String(p[0]), default: []].append(String(p[1]))
+            }
+        }
+        let text = items.map { "\($0.0)\t\($0.1.count)\t\(Int($0.1.last))" }.joined(separator: "\n")
+        try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try? text.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    init(zhPath: String, enPath: String, learnPath: String? = nil) {
+        self.learnPath = learnPath
         if let data = try? String(contentsOfFile: zhPath, encoding: .utf8) {
             data.enumerateLines { line, _ in
                 let p = line.split(separator: "\t")
@@ -56,6 +128,7 @@ final class Engine {
             var i = 0
             data.enumerateLines { line, _ in self.englishRank[line] = i; i += 1 }
         }
+        loadLearned()
     }
 
     // MARK: 判斷
@@ -168,7 +241,7 @@ final class Engine {
                 let j = i - len
                 let key = readings[j..<i].joined(separator: "-")
                 let text: String, score: Double
-                if let top = phrases[key]?.first { text = top.text; score = top.score }
+                if let top = lookup(key).first { text = top.text; score = top.score }
                 else if len == 1 { text = readings[j]; score = -20 }
                 else { continue }
                 if best[j] + score > best[i] { best[i] = best[j] + score; back[i] = (j, text) }
@@ -211,9 +284,34 @@ final class Engine {
 
     /// 送出：還沒打完聲調的注音當成英文
     func commit() -> String {
-        let text = render(segs + (cur.isEmpty ? [] : [.eng(cased(cur))]) + tail).joined()
+        let all = segs + (cur.isEmpty ? [] : [.eng(cased(cur))]) + tail
+        let parts = render(all)
+        learnCombinations(all, parts)
         clear()
-        return text
+        return parts.joined()
+    }
+
+    /// 送出時，把選過的字跟前後相鄰的字記成新詞（例如自動轉成「李小名」，把「名」改成「明」→ 記住「小明」）
+    private func learnCombinations(_ all: [Seg], _ parts: [String]) {
+        func readings(_ seg: Seg) -> [String]? {
+            switch seg {
+            case .syl(let r, _): return [r]
+            case .fixed(_, let syls): return syls.map(\.0)
+            default: return nil
+            }
+        }
+        var changed = false
+        for (i, seg) in all.enumerated() {
+            guard case .fixed(let text, let syls) = seg else { continue }
+            let mine = syls.map(\.0)
+            if i > 0, let prev = readings(all[i - 1]), prev.count == 1 {
+                learn(prev + mine, parts[i - 1] + text); changed = true
+            }
+            if i + 1 < all.count, let next = readings(all[i + 1]), next.count == 1 {
+                learn(mine + next, text + parts[i + 1]); changed = true
+            }
+        }
+        if changed || all.contains(where: { if case .fixed = $0 { return true }; return false }) { saveLearned() }
     }
 
     /// 結尾的連續音節（選過的字詞會拆回音節，可以重選）
@@ -244,7 +342,7 @@ final class Engine {
 
         for len in stride(from: min(syls.count, 8), through: 1, by: -1) {
             let key = syls.suffix(len).map(\.0).joined(separator: "-")
-            for p in phrases[key] ?? [] { add(Candidate(text: p.text, sylCount: len, isRaw: false)) }
+            for p in lookup(key) { add(Candidate(text: p.text, sylCount: len, isRaw: false)) }
         }
         // 英文／數字的還原選項：常用英文字或數字排在第 2 個，其他排最後
         let raw = last.1
@@ -267,6 +365,8 @@ final class Engine {
         // 拆開選過的詞時，多出來的音節放回去
         let extra = syls.count - c.sylCount
         for s in syls.prefix(max(extra, 0)) { segs.append(.syl(reading: s.0, raw: s.1)) }
-        segs.append(c.isRaw ? .eng(c.text) : .fixed(text: c.text, syls: Array(syls.suffix(c.sylCount))))
+        let picked = Array(syls.suffix(c.sylCount))
+        segs.append(c.isRaw ? .eng(c.text) : .fixed(text: c.text, syls: picked))
+        if !c.isRaw { learn(picked.map(\.0), c.text) }
     }
 }

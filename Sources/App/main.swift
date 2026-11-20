@@ -10,7 +10,10 @@ if CommandLine.arguments.contains("--register") {
 }
 
 let engine = Engine(zhPath: Bundle.main.path(forResource: "zh", ofType: "txt") ?? "",
-                    enPath: Bundle.main.path(forResource: "en", ofType: "txt") ?? "")
+                    enPath: Bundle.main.path(forResource: "en", ofType: "txt") ?? "",
+                    // 學到的字詞只存在本機，不會上傳
+                    learnPath: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+                        .appendingPathComponent("MixedBopomofo/learned.tsv").path)
 let connectionName = Bundle.main.infoDictionary?["InputMethodConnectionName"] as? String ?? "MixedBopomofo_Connection"
 let server = IMKServer(name: connectionName, bundleIdentifier: Bundle.main.bundleIdentifier)
 NSApplication.shared.run()

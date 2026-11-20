@@ -5,7 +5,9 @@ import Foundation
 //          ⏎=Enter  其他全形標點=Shift+標點鍵
 
 let root = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().deletingLastPathComponent().path
-let engine = Engine(zhPath: root + "/Resources/zh.txt", enPath: root + "/Resources/en.txt")
+// LEARN=路徑 時啟用學習（測試用）；預設不學習，結果才固定
+let engine = Engine(zhPath: root + "/Resources/zh.txt", enPath: root + "/Resources/en.txt",
+                    learnPath: ProcessInfo.processInfo.environment["LEARN"])
 
 func run(_ title: String, _ keys: String) {
     engine.clear()
