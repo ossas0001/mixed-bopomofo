@@ -167,6 +167,14 @@ final class Engine {
                 }
             }
         }
+        // 打錯字後的自動恢復：前面已經變成英文亂碼時，只要後面又打出一個完整的注音，就把它切出來當中文。
+        // 例如 sx3cl3：sx3 組不成注音，但 cl3 = ㄏㄠˇ，所以結果是「sx3好」，而不是整串都變亂碼。
+        if !curIsBopomofo, let split = recoverSyllable(ch) {
+            segs.append(.eng(cased(split.prefix)))
+            segs.append(.syl(reading: split.reading, raw: split.raw))
+            cur = ""
+            return
+        }
         // 走到這裡表示目前是英文／數字，或這個鍵讓注音不成立
         if ch == " " {
             segs.append(.eng(cased(cur))); segs.append(.lit(" ")); cur = ""
@@ -176,6 +184,21 @@ final class Engine {
             cur.append(ch)
             if upperEnglish && !curIsBopomofo { cur = cur.uppercased() }
         }
+    }
+
+    /// 找出「英文亂碼＋一個完整注音」的切法。
+    /// 聲調 3 4 6 7：英文單字幾乎不會出現，可以放心切。
+    /// 空白鍵（一聲）：只有在前面不是英文單字時才切，避免 hello 被切成 hell＋欸。注音至少要兩個鍵。
+    private func recoverSyllable(_ ch: Character) -> (prefix: String, reading: String, raw: String)? {
+        guard let tone = Engine.toneMap[ch], cur.count >= 2, !cur.allSatisfy(\.isNumber) else { return nil }
+        if ch == " " && englishRank[cur.lowercased()] != nil { return nil }
+        for len in stride(from: min(3, cur.count - 1), through: 2, by: -1) {     // 至少兩個鍵，避免 win7 → wi思
+            let suffix = String(cur.suffix(len))
+            guard let b = bopomofo(suffix), let entries = phrases[b + tone], let top = entries.first,
+                  top.score > -7 else { continue }      // 只對得到罕見字的不算
+            return (String(cur.dropLast(len)), b + tone, suffix + (ch == " " ? "" : String(ch)))
+        }
+        return nil
     }
 
     /// 全形標點等直接插入的文字
